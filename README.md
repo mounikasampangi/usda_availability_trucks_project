@@ -1,67 +1,34 @@
-# Q3 Reefer Availability Chart — automated build
+# 🚛 Truck Availability Tracker — automated reefer-capacity signals
 
-GitHub Actions pipeline that pulls USDA refrigerated-truck data and
-regenerates the interactive Q3 availability chart, then publishes it to
-GitHub Pages.
+> An automated pipeline that turns USDA refrigerated-truck data into a clear regional capacity signal, so a freight team can see where reefer capacity is tightening **before** it shows up in rates — and rebuilds itself on every run with zero manual work.
 
-## What's here
+![Python](https://img.shields.io/badge/Python-3776AB?style=flat-square&logo=python&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-2088FF?style=flat-square&logo=githubactions&logoColor=white)
+![Plotly](https://img.shields.io/badge/Plotly-3F4F75?style=flat-square&logo=plotly&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
-```
-.github/workflows/build-chart.yml   # the CI workflow
-scripts/fetch_data.py               # data acquisition (API or CSV)
-scripts/build_chart.py              # builds the HTML chart
-data/refrigerated_truck_rates_and_availability.csv  # CSV fallback
-requirements.txt
-dist/                               # build output (generated)
-```
+![Q3 reefer truck availability by region](reports/figures/preview.png)
 
-## One-time setup
+## 📊 The business question
+Reefer (refrigerated-truck) capacity swings hard by region and season. If you can see **which lanes are structurally short vs. loose**, you can pre-book capacity, renegotiate lanes, or shift volume before a rate spike hits. This project answers: *where is Q3 reefer capacity tight, where is it loose, and how has that changed year over year?*
 
-### 1. Add the API key as a repository secret
-Repo **Settings → Secrets and variables → Actions → New repository secret**
+## 🧠 Approach & trade-offs
+USDA AMS availability data (a 1–5 index, where 5 = shortage and 1 = surplus) is aggregated to a **4-year Q3 average by region** and rendered as a diverging bar chart centered on "adequate (3)." I chose a diverging layout over a plain bar chart because the *direction* from adequate is the decision-relevant signal, not the raw number.
 
-- Name: `USDA_API_KEY` (exact name — the workflow reads this)
-- Value: your USDA API key
+The pipeline ships with a **CSV fallback so it runs immediately**, and a clearly-marked API template (`fetch_from_api()`) for wiring the live USDA feed when its endpoint/auth are available. `_normalize()` enforces the `Week, Quarter, Year, Region, Availability` schema so a bad response **fails loudly in CI** instead of silently publishing a wrong chart — an intentional "fail fast" choice for anything that auto-deploys.
 
-The key is never printed or committed. It is injected only as an
-environment variable inside the Action run.
+## 🔑 Key findings (4-year Q3 average)
+- **Mexico–Texas sits in structural surplus every Q3** (~1.0–1.1, the floor of the scale) — a permanent condition worth planning capacity around, not a one-off good year.
+- **Eastern lanes stay tight:** Indiana (3.94), Mid-Atlantic (3.70), and Florida (3.59) run consistently above "adequate," even after easing from near-crisis (~4.8) levels in Q3 2022.
+- Western/central regions (California, PNW, Arizona, Great Lakes) cluster near balanced.
 
-### 2. Enable GitHub Pages
-Repo **Settings → Pages → Build and deployment → Source: GitHub Actions**
+## ✅ Decision this supports
+Pre-book or contract reefer capacity in the tight eastern lanes ahead of Q3, and lean on the reliable Mexico–Texas surplus when flexing volume — turning a seasonal scramble into a planned position.
 
-After the first successful run, the chart is live at
-`https://<your-user>.github.io/<repo>/`.
+## 🛠️ Stack
+Python (pandas) · Plotly · GitHub Actions (scheduled + on-push rebuild) · GitHub Pages
 
-### 3. Wire in the real API (when ready)
-`scripts/fetch_data.py` ships with a working **CSV fallback** so the
-pipeline runs immediately. The live API call is a clearly marked
-template — it could not be implemented blind because the USDA API's
-URL, auth scheme, and response schema were not available during
-development.
-
-Fill in the **4 marked spots** in `fetch_from_api()`:
-1. the real endpoint URL
-2. the auth header/param style your API uses
-3. query parameters (date range, dataset, format)
-4. response parsing to the canonical columns
-
-Then flip `DATA_SOURCE` to `"api"` in `build-chart.yml` (the `env:`
-block of the build step). `_normalize()` enforces the required schema
-so a bad response fails loudly in CI rather than silently producing a
-wrong chart.
-
-## When it runs
-
-- **On every push to `main`** (primary trigger — rebuilds & redeploys)
-- **Manually**, via the *Run workflow* button (`workflow_dispatch`) — lets
-  you re-pull data without a commit
-- Periodic schedule is commented out in the workflow; uncomment the cron
-  if you also want a time-based refresh independent of pushes
-
-Change any of these at the top of `build-chart.yml`.
-
-## Run locally
-
+## ▶️ Run it locally
 ```bash
 pip install -r requirements.txt
 
@@ -72,15 +39,7 @@ python scripts/build_chart.py dist/Q3_Availability_Graph.html
 export USDA_API_KEY=your_key
 DATA_SOURCE=api python scripts/build_chart.py dist/Q3_Availability_Graph.html
 ```
+Then open `dist/Q3_Availability_Graph.html`.
 
-Open `dist/Q3_Availability_Graph.html` in a browser.
-
-## Notes
-
-- The chart design is fixed (the approved Q2-faithful version). Only the
-  embedded data changes between builds.
-- The data contract is `Week, Quarter, Year, Region, Availability`. As
-  long as `fetch_data()` returns those columns, the chart builds.
-- Plotly and the fonts load from CDNs at view time, so the published
-  page needs internet access in the viewer's browser (standard for
-  GitHub Pages).
+## 📂 Data & license
+Source: **USDA Agricultural Marketing Service (AMS)** — public refrigerated-truck rate & availability reports. Code released under the [MIT License](LICENSE).

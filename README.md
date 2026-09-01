@@ -7,6 +7,8 @@
 ![D3](https://img.shields.io/badge/D3.js-F9A03C?style=flat-square&logo=d3dotjs&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
+**Live chart: https://mounikasampangi.github.io/usda_availability_trucks_project/**
+
 ![Q4 reefer truck availability by region](reports/figures/preview.png)
 
 ## 📊 The business question
@@ -67,7 +69,7 @@ webflow-embeds/                    iframe snippet for the website
 ```
 
 ## 🌐 Embedding
-`webflow-embeds/reefer-truck-availability.html` holds the iframe snippet for the Webflow Embed element.
+`webflow-embeds/reefer-truck-availability.html` holds the iframe snippet for the Webflow Embed element. It points at the Pages URL above, so the embedded copy updates whenever this repo deploys.
 
 ## 📂 Data & license
 Source: **USDA Agricultural Marketing Service (AMS)**, Refrigerated Truck Rates and Availability (Socrata dataset `acar-e3r8`). Code released under the [MIT License](LICENSE).

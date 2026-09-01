@@ -7,10 +7,15 @@ isolated so the API contract is independent of the chart-generation logic.
 Source: USDA AMS Specialty Crops Program via Socrata at agtransport.usda.gov,
 dataset acar-e3r8 — "Refrigerated Truck Rates and Availability". It carries
 the weekly 1-5 truck availability scale (1=Surplus -> 5=Shortage) by origin
-region, which is what the chart consumes.
+region, which is what the map consumes.
 
 `fetch_data()` returns a pandas DataFrame with AT LEAST these columns:
-    Week (int), Quarter (int), Year (int), Region (str), Availability (float)
+    Week (int), Month (int), Quarter (int), Year (int),
+    Region (str), Availability (float)
+
+`Region` is already bucketed into the canonical USDA AMS shipping regions
+(Indiana -> Great Lakes, Pennsylvania -> Mid-Atlantic, and so on) because the
+heat map colors whole shipping districts, not individual reporting origins.
 
 A CSV fallback is retained for local runs without network. Set DATA_SOURCE=api
 (the workflow does this by default) to use the live Socrata API.
@@ -19,6 +24,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -40,7 +46,7 @@ CSV_FALLBACK_PATH = os.environ.get(
     "CSV_FALLBACK_PATH", "data/refrigerated_truck_rates_and_availability.csv"
 )
 
-REQUIRED_COLUMNS = ["Week", "Quarter", "Year", "Region", "Availability"]
+REQUIRED_COLUMNS = ["Week", "Month", "Quarter", "Year", "Region", "Availability"]
 
 # Socrata dataset: Refrigerated Truck Rates and Availability.
 #   https://agtransport.usda.gov/Truck/Refrigerated-Truck-Rates-and-Availability/acar-e3r8/data
@@ -49,10 +55,37 @@ DATASET_ID = "acar-e3r8"
 API_URL = f"https://{SOCRATA_DOMAIN}/resource/{DATASET_ID}.json"
 PAGE_SIZE = 10_000
 
-# Year window exposed by the chart's Year dropdown (inclusive). Both fetch
-# paths clip to this range so the dropdown only ever lists these years.
-YEAR_MIN = 2022
-YEAR_MAX = 2025
+# The chart reports a Q4 (Oct-Dec) four-year average.
+QUARTER = 4
+QUARTER_MONTHS = (10, 11, 12)
+N_YEARS = 4
+
+
+def latest_complete_year(today: date | None = None) -> int:
+    """Most recent year whose Q4 has finished.
+
+    Q4 of year Y only closes on 31 Dec, so at any point during year Y the
+    newest complete Q4 is Y-1. Pinning the window this way keeps a mid-quarter
+    rebuild from averaging in a partial December.
+    """
+    today = today or date.today()
+    return today.year - 1
+
+
+def year_window(today: date | None = None) -> tuple[int, int]:
+    """(first, last) year of the rolling N_YEARS Q4 window.
+
+    Override with YEAR_MIN / YEAR_MAX env vars to rebuild a fixed historical
+    window (useful for reproducing a published chart)."""
+    last = int(os.environ.get("YEAR_MAX") or latest_complete_year(today))
+    first = int(os.environ.get("YEAR_MIN") or (last - (N_YEARS - 1)))
+    if first > last:
+        raise ValueError(f"YEAR_MIN ({first}) is after YEAR_MAX ({last}).")
+    return first, last
+
+
+YEAR_MIN, YEAR_MAX = year_window()
+YEARS = list(range(YEAR_MIN, YEAR_MAX + 1))
 
 
 _GREAT_LAKES = {"GREAT LAKES", "MICHIGAN", "WISCONSIN", "MINNESOTA",
@@ -62,6 +95,16 @@ _MID_ATLANTIC = {"MID-ATLANTIC", "PENNSYLVANIA", "NEW JERSEY", "DELAWARE",
 _SOUTHEAST = {"SOUTHEAST", "NORTH CAROLINA", "SOUTH CAROLINA", "GEORGIA",
               "ALABAMA", "TENNESSEE", "KENTUCKY"}
 _PNW = {"PNW", "PACIFIC NORTHWEST", "WASHINGTON", "OREGON", "IDAHO"}
+
+# Canonical USDA AMS shipping regions, in the order the map legend lists them.
+# Anything normalize_region() cannot place (Canada, "OTHER", blank) is dropped
+# rather than guessed at — a mis-bucketed origin would silently recolor a
+# whole district.
+KNOWN_REGIONS: list[str] = [
+    "Arizona", "California", "Colorado", "Florida", "Great Lakes",
+    "Mexico-Arizona", "Mexico-California", "Mexico-New Mexico", "Mexico-Texas",
+    "Mid-Atlantic", "New York", "PNW", "Southeast", "Texas",
+]
 
 
 def normalize_region(raw: str) -> str | None:
@@ -131,22 +174,43 @@ def _get_with_retry(
     raise RuntimeError("unreachable")
 
 
+def _months_from(raw: pd.DataFrame) -> pd.Series:
+    """Reporting month per row.
+
+    Prefer the dataset's own `month` column: it is the month AMS attributes the
+    marketing week to, which is NOT always the calendar month of `date`. A week
+    that opens in late December carries month 12 on a January date, and 572 of
+    the Q4 2022-2025 rows disagree this way. Deriving the month from `date`
+    would drop those weeks out of Q4 entirely.
+
+    Parsing `date` is only the fallback, in case the column is ever renamed.
+    """
+    if "month" in raw.columns:
+        months = pd.to_numeric(raw["month"], errors="coerce")
+        if months.notna().any():
+            return months
+    if "date" in raw.columns:
+        return pd.to_datetime(raw["date"], errors="coerce").dt.month
+    raise ValueError(
+        "Socrata response has neither a `month` nor a `date` column; cannot "
+        f"derive the Oct/Nov/Dec split. Columns: {list(raw.columns)}"
+    )
+
+
 def fetch_from_api() -> pd.DataFrame:
-    """Pull live data from the USDA AMS Socrata dataset acar-e3r8.
+    """Pull live Q4 data from the USDA AMS Socrata dataset acar-e3r8.
 
     Returns a flat DataFrame: one row per source observation, with the
-    canonical Week/Quarter/Year/Region/Availability columns. The chart layer
-    filters to a specific quarter itself — this layer pulls the full history
-    so the Year dropdown can offer multiple years."""
+    canonical Week/Month/Quarter/Year/Region/Availability columns."""
     headers: dict[str, str] = {"Accept": "application/json"}
     if SOCRATA_APP_TOKEN:
         headers["X-App-Token"] = SOCRATA_APP_TOKEN
 
     rows: list[dict[str, Any]] = []
     offset = 0
-    # Server-side year filter — keeps the download to the 4 years the chart
-    # actually exposes in its Year dropdown.
-    where = f"date_extract_y(date) BETWEEN {YEAR_MIN} AND {YEAR_MAX}"
+    # Server-side filter — quarter and year are their own columns, so Socrata
+    # drops ~96% of the table before it hits the wire.
+    where = f"quarter = {QUARTER} AND year BETWEEN {YEAR_MIN} AND {YEAR_MAX}"
     while True:
         params: dict[str, Any] = {
             "$limit": PAGE_SIZE,
@@ -175,43 +239,47 @@ def fetch_from_api() -> pd.DataFrame:
 
     if not rows:
         raise ValueError(
-            f"Socrata returned 0 rows for {DATASET_ID}. Check that the dataset "
-            f"is still published at {API_URL}."
+            f"Socrata returned 0 rows for {DATASET_ID} in Q{QUARTER} "
+            f"{YEAR_MIN}-{YEAR_MAX}. Check that the dataset is still published "
+            f"at {API_URL}."
         )
 
     raw = pd.DataFrame(rows)
-    # The dataset exposes week, quarter, year, region, availability as their
-    # own columns — use them directly rather than re-deriving from `date`.
     df = pd.DataFrame({
-        "Week": pd.to_numeric(raw["week"], errors="coerce").astype("Int64"),
-        "Quarter": pd.to_numeric(raw["quarter"], errors="coerce").astype("Int64"),
-        "Year": pd.to_numeric(raw["year"], errors="coerce").astype("Int64"),
+        "Week": pd.to_numeric(raw.get("week"), errors="coerce").astype("Int64"),
+        "Month": pd.to_numeric(_months_from(raw), errors="coerce").astype("Int64"),
+        "Quarter": pd.to_numeric(raw.get("quarter"), errors="coerce").astype("Int64"),
+        "Year": pd.to_numeric(raw.get("year"), errors="coerce").astype("Int64"),
         "Region": raw["region"].map(normalize_region),
-        "Availability": pd.to_numeric(raw["availability"], errors="coerce"),
+        "Availability": pd.to_numeric(raw.get("availability"), errors="coerce"),
     })
-    # Drop rows whose region we don't recognize or whose availability isn't a
-    # valid 1-5 rating; everything else falls through to _normalize().
-    df = df[df["Region"].notna() & df["Availability"].between(1, 5)]
     return _normalize(df)
 
 
 def fetch_from_csv() -> pd.DataFrame:
-    """Fallback: read the committed CSV export. Lets CI run before the
-    API is wired in. This matches the data file used during development."""
+    """Fallback: read the committed CSV export, so the pipeline still runs
+    (and CI still fails loudly on a schema change) without network access."""
     if not os.path.exists(CSV_FALLBACK_PATH):
         raise FileNotFoundError(
             f"CSV fallback not found at {CSV_FALLBACK_PATH}. Either commit the "
-            f"CSV there, or set DATA_SOURCE=api once fetch_from_api() is done."
+            f"CSV there, or set DATA_SOURCE=api."
         )
-    df = pd.read_csv(CSV_FALLBACK_PATH, usecols=lambda c: c in REQUIRED_COLUMNS)
-    df = df[pd.to_numeric(df["Year"], errors="coerce").between(YEAR_MIN, YEAR_MAX)]
+    raw = pd.read_csv(CSV_FALLBACK_PATH)
+    df = pd.DataFrame({
+        "Week": pd.to_numeric(raw.get("Week"), errors="coerce").astype("Int64"),
+        "Month": pd.to_numeric(raw.get("Month"), errors="coerce").astype("Int64"),
+        "Quarter": pd.to_numeric(raw.get("Quarter"), errors="coerce").astype("Int64"),
+        "Year": pd.to_numeric(raw.get("Year"), errors="coerce").astype("Int64"),
+        "Region": raw.get("Region", pd.Series(dtype=str)).map(normalize_region),
+        "Availability": pd.to_numeric(raw.get("Availability"), errors="coerce"),
+    })
     return _normalize(df)
 
 
 def _normalize(df: pd.DataFrame) -> pd.DataFrame:
-    """Coerce to the canonical schema regardless of source. This is the
-    contract the rest of the pipeline depends on — keep it strict so a
-    bad API response fails loudly here, not silently in the chart."""
+    """Coerce to the canonical schema and clip to the Q4 window, regardless of
+    source. This is the contract the rest of the pipeline depends on — keep it
+    strict so a bad API response fails loudly here, not silently in the map."""
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(
@@ -221,21 +289,31 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
             f"{REQUIRED_COLUMNS}"
         )
     out = df[REQUIRED_COLUMNS].copy()
-    for col in ["Week", "Quarter", "Year"]:
+    for col in ["Week", "Month", "Quarter", "Year"]:
         out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
     out["Availability"] = pd.to_numeric(out["Availability"], errors="coerce")
-    out["Region"] = out["Region"].astype(str).str.strip()
-    out = out.dropna(subset=["Week", "Quarter", "Year", "Availability"])
+    out = out.dropna(subset=["Month", "Quarter", "Year", "Region", "Availability"])
+
+    out = out[out["Quarter"] == QUARTER]
+    out = out[out["Month"].isin(QUARTER_MONTHS)]
+    out = out[out["Year"].between(YEAR_MIN, YEAR_MAX)]
+    # The published scale is an integer 1-5; anything outside it is a data
+    # error, not a reading.
+    out = out[out["Availability"].between(1, 5)]
+
     if out.empty:
-        raise ValueError("After normalization the dataset is empty — check "
-                          "the source/parsing.")
+        raise ValueError(
+            f"After normalization no Q{QUARTER} {YEAR_MIN}-{YEAR_MAX} rows "
+            f"remain — check the source/parsing."
+        )
     return out
 
 
 def fetch_data() -> pd.DataFrame:
     """Single entry point used by build_chart.py."""
     src = "api" if DATA_SOURCE == "api" else "csv"
-    print(f"[fetch_data] source = {src}", file=sys.stderr)
+    print(f"[fetch_data] source = {src}, Q{QUARTER} {YEAR_MIN}-{YEAR_MAX}",
+          file=sys.stderr)
     df = fetch_from_api() if src == "api" else fetch_from_csv()
     print(f"[fetch_data] {len(df):,} rows, "
           f"years {int(df.Year.min())}-{int(df.Year.max())}, "

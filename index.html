@@ -29,20 +29,26 @@
        orange = shortage. Lightness runs monotonically from each pole into the
        middle so the two arms read at equal strength.
 
-       The steps tighten to 0.4 either side of the midpoint because Q4 readings
-       cluster far closer to "adequate" than Q3 ones do. Half-point bands would
-       flatten most of the country into a single gray and hide a real 1.3-point
-       spread. The cuts are fixed, not fitted to the current selection, so a
-       color means the same thing in every year and month. */
-    --sur-4: #2f5c1a;   /* <  1.5    deep surplus    */
-    --sur-3: #4a8b2c;   /* 1.5 - 2.0 surplus         */
-    --sur-2: #7cb854;   /* 2.0 - 2.5 looser          */
-    --sur-1: #c8e3b6;   /* 2.5 - 2.9 slightly loose  */
-    --mid-0: #e4e5e3;   /* 2.9 - 3.1 adequate        */
-    --short-1: #fadcbd; /* 3.1 - 3.5 slightly tight  */
-    --short-2: #f7be80; /* 3.5 - 4.0 tight           */
-    --short-3: #ec7700; /* 4.0 - 4.5 shortage        */
-    --short-4: #a85400; /* >= 4.5    severe shortage */
+       Two things are tuned to how Q4 actually reads. The cuts cluster tightly
+       around 3 because Q4 districts sit far closer to "adequate" than Q3 ones
+       do; even-width bands across the full 1-5 scale left almost every state in
+       one of three shades and the map looked frozen when you changed year. And
+       each step is at least 8 points of L* from its neighbour, so a band change
+       is actually visible: the earlier ramp stepped 1.3 L* across the busiest
+       boundary, which no one can see.
+
+       The cuts are fixed rather than fitted to the current selection, so a
+       color means the same thing in every year and month. Readings past the end
+       cuts clamp to the end colors. */
+    --sur-4: #1d4a0f;   /* <  2.2     deep surplus    */
+    --sur-3: #3a7522;   /* 2.2 - 2.6  surplus         */
+    --sur-2: #5f9e3a;   /* 2.6 - 2.8  looser          */
+    --sur-1: #96c977;   /* 2.8 - 2.95 slightly loose  */
+    --mid-0: #dcdedb;   /* 2.95 - 3.05 adequate       */
+    --short-1: #eeb265; /* 3.05 - 3.2 slightly tight  */
+    --short-2: #ef9f44; /* 3.2 - 3.4  tight           */
+    --short-3: #d97400; /* 3.4 - 3.8  shortage        */
+    --short-4: #94480a; /* >= 3.8     severe shortage */
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -565,17 +571,36 @@ function fmt(mean) {
 // Seven diverging bands off the "adequate" midpoint. The cut points mirror the
 // language AMS uses for the index, so a color change always means the verdict
 // changed too.
+// Colour resolution and wording are set separately on purpose. The cuts are
+// fine so the map can move, but the words stay anchored to what the index
+// actually means: "Shortage" is held back to 3.8, not handed to a 3.4 that is
+// only modestly above adequate.
 const BANDS = [
-  { max: 1.5, color: "--sur-4",   label: "Deep surplus" },
-  { max: 2.0, color: "--sur-3",   label: "Surplus" },
-  { max: 2.5, color: "--sur-2",   label: "Looser" },
-  { max: 2.9, color: "--sur-1",   label: "Slightly loose" },
-  { max: 3.1, color: "--mid-0",   label: "Adequate" },
-  { max: 3.5, color: "--short-1", label: "Slightly tight" },
-  { max: 4.0, color: "--short-2", label: "Tight" },
-  { max: 4.5, color: "--short-3", label: "Shortage" },
-  { max: Infinity, color: "--short-4", label: "Severe shortage" },
+  { max: 2.2,  color: "--sur-4",   label: "Surplus" },
+  { max: 2.6,  color: "--sur-3",   label: "Loose" },
+  { max: 2.8,  color: "--sur-2",   label: "Slightly loose" },
+  { max: 2.95, color: "--sur-1",   label: "Balanced, loose side" },
+  { max: 3.05, color: "--mid-0",   label: "Adequate" },
+  { max: 3.2,  color: "--short-1", label: "Balanced, tight side" },
+  { max: 3.4,  color: "--short-2", label: "Slightly tight" },
+  { max: 3.8,  color: "--short-3", label: "Tight" },
+  { max: Infinity, color: "--short-4", label: "Shortage" },
 ];
+
+// d3 tweens the fill attribute, and it cannot parse a `var(--token)` string, so
+// interpolating between two of them rendered every changing state black for the
+// length of the transition. Resolve the tokens to real hex once and hand d3
+// colors it can actually interpolate.
+const PALETTE = (() => {
+  const cs = getComputedStyle(document.documentElement);
+  const read = name => (cs.getPropertyValue(name) || "").trim();
+  const out = {
+    "--no-data": read("--no-data") || "#f2f2f2",
+    "--mexico-fill": read("--mexico-fill") || "#f2f2f2",
+  };
+  for (const b of BANDS) out[b.color] = read(b.color);
+  return out;
+})();
 
 function band(mean) {
   return mean == null ? null : BANDS.find(b => mean < b.max);
@@ -583,7 +608,7 @@ function band(mean) {
 
 function heatColor(mean) {
   const b = band(mean);
-  return b ? `var(${b.color})` : "var(--no-data)";
+  return PALETTE[b ? b.color : "--no-data"];
 }
 
 function verdict(mean) {
@@ -784,7 +809,7 @@ async function loadTopology() {
   const countries = topojson.feature(worldTopo, worldTopo.objects.countries).features;
   const mexico = countries.find(f => String(f.id) === "484" || (f.properties && f.properties.name === "Mexico"));
   document.getElementById("mexicoShapeG").innerHTML = mexico
-    ? `<path class="mexico-shape" d="${albersPath(mexico)}" fill="var(--mexico-fill)" />`
+    ? `<path class="mexico-shape" d="${albersPath(mexico)}" fill="${PALETTE["--mexico-fill"]}" />`
     : "";
 }
 
@@ -837,7 +862,7 @@ function renderMap() {
     .append("path")
     .attr("class", "state")
     .attr("d", path)
-    .attr("fill", "var(--no-data)")
+    .attr("fill", PALETTE["--no-data"])
     .on("mouseenter", function (event, d) {
       d3.select(this).raise();
       tooltip.innerHTML = tooltipHTML(d.properties.name, STATE_TO_REGION[d.properties.name]);
@@ -849,7 +874,7 @@ function renderMap() {
     .transition().duration(dur)
     .attr("fill", d => {
       const region = STATE_TO_REGION[d.properties.name];
-      return region ? heatColor(cell(region).mean) : "var(--no-data)";
+      return region ? heatColor(cell(region).mean) : PALETTE["--no-data"];
     });
   states.exit().remove();
 
